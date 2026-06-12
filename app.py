@@ -119,6 +119,216 @@ def init_session():
 init_session()
 
 # ============================================================================
+# FONCTIONS AUXILIAIRES (définies avant les onglets pour éviter NameError)
+# ============================================================================
+
+def _get_dock_capacity(libelle: str) -> int:
+    """Détermine la capacité de quai d'un site."""
+    if libelle in st.session_state.dock_capacities:
+        return st.session_state.dock_capacities[libelle]
+    if libelle in config.SITE_DOCK_OVERRIDES:
+        return config.SITE_DOCK_OVERRIDES[libelle]
+    if libelle.startswith(config.HSJ_SUBDOCK_SITES_PREFIX):
+        return config.HSJ_SUBDOCK_CAPACITY
+    return config.DEFAULT_DOCK_CAPACITY
+
+
+def _build_models(raw: dict):
+    """Construit les modèles Pydantic à partir des données brutes."""
+    # Sites
+    sites_models = {}
+    for libelle, sdata in raw["sites"].items():
+        cap = _get_dock_capacity(libelle)
+        sites_models[libelle] = Site(
+            libelle=libelle,
+            adresse=sdata.get("adresse", ""),
+            presence_quai=sdata.get("presence_quai", False),
+            capacite_quai=cap,
+            compat_vehicules=sdata.get("compat_vehicules", {}),
+        )
+    st.session_state.sites_models = sites_models
+
+    # Véhicules
+    veh_models = {}
+    for vtype, vdata in raw["vehicules"].items():
+        lon = vdata.get("longueur", 0)
+        larg = vdata.get("largeur", 0)
+        veh_models[vtype] = Vehicule(
+            type_vehicule=vtype,
+            stationnement_initial=vdata.get("stationnement_initial", "HSJ"),
+            longueur=lon,
+            largeur=larg,
+            hauteur=vdata.get("hauteur", 0),
+            surface_utile=lon * larg,
+            poids_max=vdata.get("poids_max", 0),
+            consommation=vdata.get("consommation", 0),
+            cout_carburant=vdata.get("cout_carburant", 0),
+            cout_carbone=vdata.get("cout_carbone", 0),
+            hayon=vdata.get("hayon", False),
+            compat_contenants=vdata.get("compat_contenants", {}),
+            temps_mise_quai=vdata.get("temps_mise_quai", 10),
+            manu_sans_quai=vdata.get("manu_sans_quai"),
+            manu_avec_quai=vdata.get("manu_avec_quai", 1),
+            actif=st.session_state.vehicules_actifs.get(vtype, True),
+            max_exemplaires=st.session_state.max_vehicules.get(vtype),
+        )
+    st.session_state.vehicules_models = veh_models
+
+    # Contenants
+    cont_models = {}
+    for lib, cdata in raw["contenants"].items():
+        cont_models[lib] = Contenant(
+            libelle=lib,
+            longueur=cdata.get("longueur", 0),
+            largeur=cdata.get("largeur", 0),
+            poids_vide=cdata.get("poids_vide", 0),
+            poids_plein=cdata.get("poids_plein", 0),
+        )
+    st.session_state.contenants_models = cont_models
+
+    # RH
+    if "rh" in raw:
+        st.session_state.rh_params = raw["rh"]
+
+
+def _run_simulation(jours_a_simuler: list, fns_actives: list):
+    """Lance la simulation pour les jours et fonctions sélectionnés."""
+    raw = st.session_state.raw_data
+    resultats = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    matrix_dur_corr = appliquer_facteur_circulation(
+        raw["matrix_dur"],
+        st.session_state.circulation_factor
+    )
+
+    for i, day_idx in enumerate(jours_a_simuler):
+        nom_jour = config.DAY_NAMES[day_idx]
+        pct_base = i / len(jours_a_simuler)
+        pct_step = 1 / len(jours_a_simuler)
+
+        status_text.text(f"Jour {i+1}/{len(jours_a_simuler)} — {nom_jour} — Préparation des flux…")
+        progress_bar.progress(pct_base + pct_step * 0.05)
+
+        # Flux actifs
+        flux_actifs = get_active_flux(
+            raw["flux_brut"], day_idx, fns_actives,
+            raw["contenants"], st.session_state.circulation_factor
+        )
+        tournees_mutualisees = get_tournees_mutualisees(flux_actifs)
+
+        def _cb(pct, msg):
+            progress_bar.progress(pct_base + pct_step * (0.1 + pct * 0.7))
+            status_text.text(f"{nom_jour} — {msg}")
+
+        status_text.text(f"{nom_jour} — Construction des tournées…")
+
+        # Optimisation
+        planning = optimizer_run(
+            flux_actifs=flux_actifs,
+            vehicules=st.session_state.vehicules_models,
+            sites=st.session_state.sites_models,
+            contenants=st.session_state.contenants_models,
+            matrix_dur=matrix_dur_corr,
+            matrix_dist=raw["matrix_dist"],
+            rh=st.session_state.rh_params,
+            tournees_mutualisees=tournees_mutualisees,
+            progress_callback=_cb,
+        )
+
+        status_text.text(f"{nom_jour} — Reconstruction des tournées détaillées…")
+        progress_bar.progress(pct_base + pct_step * 0.82)
+
+        tournees = construire_tournees_finales(
+            planning,
+            st.session_state.vehicules_models,
+            st.session_state.sites_models,
+            st.session_state.contenants_models,
+            matrix_dur_corr,
+            raw["matrix_dist"],
+        )
+
+        status_text.text(f"{nom_jour} — Affectation des postes chauffeurs…")
+        progress_bar.progress(pct_base + pct_step * 0.90)
+
+        postes = affecter_postes(
+            tournees,
+            st.session_state.vehicules_models,
+            st.session_state.rh_params,
+        )
+
+        status_text.text(f"{nom_jour} — Planning des quais…")
+        progress_bar.progress(pct_base + pct_step * 0.95)
+
+        dock_planning = build_dock_planning(postes, st.session_state.sites_models, st.session_state.vehicules_models)
+        conflits = detecter_conflits_quai(dock_planning, st.session_state.sites_models)
+
+        # Calcul des métriques
+        flux_transportes = list(set(
+            fid for t in tournees for fid in t.flux_ids
+        ))
+        flux_non_servis_ids = planning.flux_non_affectes
+        flux_non_servis_list = [
+            {"id_flux": fid, "site_depart": "", "site_arrivee": "",
+             "raison": "Non affecté par l'optimiseur", "contrainte": "Compatibilité"}
+            for fid in flux_non_servis_ids
+        ]
+        nb_actifs = len(flux_actifs)
+        taux_svc = (len(flux_transportes) / nb_actifs * 100) if nb_actifs else 100
+
+        km_total = sum(t.km_total for t in tournees)
+        km_vide = sum(t.km_vide for t in tournees)
+        nb_desinf = sum(t.nb_desinfections for t in tournees)
+
+        erreurs_conformite = []
+        for c in conflits:
+            erreurs_conformite.append({
+                "type": "CONFLIT_QUAI",
+                "statut": "ALERTE",
+                "detail": f"Site {c['site']} : {c['nb_vehicules']} véhicules simultanés > capacité {c['capacite']}",
+                "concerne": c["site"],
+                "gravite": "MOYEN",
+                "action": "Décaler les créneaux de livraison sur ce site",
+            })
+
+        if flux_non_servis_list:
+            erreurs_conformite.append({
+                "type": "FLUX_NON_SERVIS",
+                "statut": "ERREUR",
+                "detail": f"{len(flux_non_servis_list)} flux non pris en charge",
+                "concerne": str(flux_non_servis_ids[:5]),
+                "gravite": "CRITIQUE",
+                "action": "Vérifier la compatibilité véhicule/flux et la fenêtre horaire",
+            })
+
+        res = ResultatJour(
+            jour=nom_jour,
+            jour_idx=day_idx,
+            tournees=tournees,
+            postes=postes,
+            flux_transportes=flux_transportes,
+            flux_non_servis=flux_non_servis_list,
+            nb_vehicules=len(set(t.type_vehicule for t in tournees)),
+            nb_postes=len(postes),
+            km_total=km_total,
+            km_vide=km_vide,
+            nb_desinfections=nb_desinf,
+            taux_service=round(taux_svc, 1),
+            erreurs_conformite=erreurs_conformite,
+        )
+        resultats.append(res)
+        progress_bar.progress(pct_base + pct_step)
+
+    st.session_state.resultats = resultats
+    st.session_state.simulation_done = True
+    progress_bar.progress(1.0)
+    status_text.text("✅ Simulation terminée !")
+    st.success(f"Simulation de {len(resultats)} jour(s) complétée avec succès.")
+    st.rerun()
+
+
+# ============================================================================
 # ONGLETS PRINCIPAUX
 # ============================================================================
 tab_icons = ["📥 Import & Contrôles", "⚙️ Paramètres", "▶️ Simulation", "📊 Résultats", "📤 Export"]
@@ -231,75 +441,6 @@ with tabs[0]:
             st.error(f"⛔ {len(formulas)} cellule(s) de quantité contiennent des formules non calculées.")
             df_form = pd.DataFrame(formulas)
             st.dataframe(df_form, use_container_width=True)
-
-
-def _build_models(raw: dict):
-    """Construit les modèles Pydantic à partir des données brutes."""
-    # Sites
-    sites_models = {}
-    for libelle, sdata in raw["sites"].items():
-        cap = _get_dock_capacity(libelle)
-        sites_models[libelle] = Site(
-            libelle=libelle,
-            adresse=sdata.get("adresse", ""),
-            presence_quai=sdata.get("presence_quai", False),
-            capacite_quai=cap,
-            compat_vehicules=sdata.get("compat_vehicules", {}),
-        )
-    st.session_state.sites_models = sites_models
-
-    # Véhicules
-    veh_models = {}
-    for vtype, vdata in raw["vehicules"].items():
-        lon = vdata.get("longueur", 0)
-        larg = vdata.get("largeur", 0)
-        veh_models[vtype] = Vehicule(
-            type_vehicule=vtype,
-            stationnement_initial=vdata.get("stationnement_initial", "HSJ"),
-            longueur=lon,
-            largeur=larg,
-            hauteur=vdata.get("hauteur", 0),
-            surface_utile=lon * larg,
-            poids_max=vdata.get("poids_max", 0),
-            consommation=vdata.get("consommation", 0),
-            cout_carburant=vdata.get("cout_carburant", 0),
-            cout_carbone=vdata.get("cout_carbone", 0),
-            hayon=vdata.get("hayon", False),
-            compat_contenants=vdata.get("compat_contenants", {}),
-            temps_mise_quai=vdata.get("temps_mise_quai", 10),
-            manu_sans_quai=vdata.get("manu_sans_quai"),
-            manu_avec_quai=vdata.get("manu_avec_quai", 1),
-            actif=st.session_state.vehicules_actifs.get(vtype, True),
-            max_exemplaires=st.session_state.max_vehicules.get(vtype),
-        )
-    st.session_state.vehicules_models = veh_models
-
-    # Contenants
-    cont_models = {}
-    for lib, cdata in raw["contenants"].items():
-        cont_models[lib] = Contenant(
-            libelle=lib,
-            longueur=cdata.get("longueur", 0),
-            largeur=cdata.get("largeur", 0),
-            poids_vide=cdata.get("poids_vide", 0),
-            poids_plein=cdata.get("poids_plein", 0),
-        )
-    st.session_state.contenants_models = cont_models
-
-    # RH
-    if "rh" in raw:
-        st.session_state.rh_params = raw["rh"]
-
-
-def _get_dock_capacity(libelle: str) -> int:
-    """Détermine la capacité de quai d'un site."""
-    if libelle in st.session_state.dock_capacities:
-        return st.session_state.dock_capacities[libelle]
-    if libelle in config.SITE_DOCK_OVERRIDES:
-        return config.SITE_DOCK_OVERRIDES[libelle]
-    if libelle.startswith(config.HSJ_SUBDOCK_SITES_PREFIX):
-        return config.HSJ_SUBDOCK_CAPACITY
-    return config.DEFAULT_DOCK_CAPACITY
 
 
 # ============================================================================
@@ -493,142 +634,6 @@ with tabs[2]:
             if st.button("🚀 Lancer la simulation", type="primary", disabled=btn_disabled):
                 _run_simulation(jours_a_simuler, fns_actives)
 
-
-def _run_simulation(jours_a_simuler: list, fns_actives: list):
-    """Lance la simulation pour les jours et fonctions sélectionnés."""
-    raw = st.session_state.raw_data
-    resultats = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    matrix_dur_corr = appliquer_facteur_circulation(
-        raw["matrix_dur"],
-        st.session_state.circulation_factor
-    )
-
-    for i, day_idx in enumerate(jours_a_simuler):
-        nom_jour = config.DAY_NAMES[day_idx]
-        pct_base = i / len(jours_a_simuler)
-        pct_step = 1 / len(jours_a_simuler)
-
-        status_text.text(f"Jour {i+1}/{len(jours_a_simuler)} — {nom_jour} — Préparation des flux…")
-        progress_bar.progress(pct_base + pct_step * 0.05)
-
-        # Flux actifs
-        flux_actifs = get_active_flux(
-            raw["flux_brut"], day_idx, fns_actives,
-            raw["contenants"], st.session_state.circulation_factor
-        )
-        tournees_mutualisees = get_tournees_mutualisees(flux_actifs)
-
-        def _cb(pct, msg):
-            progress_bar.progress(pct_base + pct_step * (0.1 + pct * 0.7))
-            status_text.text(f"{nom_jour} — {msg}")
-
-        status_text.text(f"{nom_jour} — Construction des tournées…")
-
-        # Optimisation
-        planning = optimizer_run(
-            flux_actifs=flux_actifs,
-            vehicules=st.session_state.vehicules_models,
-            sites=st.session_state.sites_models,
-            contenants=st.session_state.contenants_models,
-            matrix_dur=matrix_dur_corr,
-            matrix_dist=raw["matrix_dist"],
-            rh=st.session_state.rh_params,
-            tournees_mutualisees=tournees_mutualisees,
-            progress_callback=_cb,
-        )
-
-        status_text.text(f"{nom_jour} — Reconstruction des tournées détaillées…")
-        progress_bar.progress(pct_base + pct_step * 0.82)
-
-        tournees = construire_tournees_finales(
-            planning,
-            st.session_state.vehicules_models,
-            st.session_state.sites_models,
-            st.session_state.contenants_models,
-            matrix_dur_corr,
-            raw["matrix_dist"],
-        )
-
-        status_text.text(f"{nom_jour} — Affectation des postes chauffeurs…")
-        progress_bar.progress(pct_base + pct_step * 0.90)
-
-        postes = affecter_postes(
-            tournees,
-            st.session_state.vehicules_models,
-            st.session_state.rh_params,
-        )
-
-        status_text.text(f"{nom_jour} — Planning des quais…")
-        progress_bar.progress(pct_base + pct_step * 0.95)
-
-        dock_planning = build_dock_planning(postes, st.session_state.sites_models, st.session_state.vehicules_models)
-        conflits = detecter_conflits_quai(dock_planning, st.session_state.sites_models)
-
-        # Calcul des métriques
-        flux_transportes = list(set(
-            fid for t in tournees for fid in t.flux_ids
-        ))
-        flux_non_servis_ids = planning.flux_non_affectes
-        flux_non_servis_list = [
-            {"id_flux": fid, "site_depart": "", "site_arrivee": "",
-             "raison": "Non affecté par l'optimiseur", "contrainte": "Compatibilité"}
-            for fid in flux_non_servis_ids
-        ]
-        nb_actifs = len(flux_actifs)
-        taux_svc = (len(flux_transportes) / nb_actifs * 100) if nb_actifs else 100
-
-        km_total = sum(t.km_total for t in tournees)
-        km_vide = sum(t.km_vide for t in tournees)
-        nb_desinf = sum(t.nb_desinfections for t in tournees)
-
-        erreurs_conformite = []
-        for c in conflits:
-            erreurs_conformite.append({
-                "type": "CONFLIT_QUAI",
-                "statut": "ALERTE",
-                "detail": f"Site {c['site']} : {c['nb_vehicules']} véhicules simultanés > capacité {c['capacite']}",
-                "concerne": c["site"],
-                "gravite": "MOYEN",
-                "action": "Décaler les créneaux de livraison sur ce site",
-            })
-
-        if flux_non_servis_list:
-            erreurs_conformite.append({
-                "type": "FLUX_NON_SERVIS",
-                "statut": "ERREUR",
-                "detail": f"{len(flux_non_servis_list)} flux non pris en charge",
-                "concerne": str(flux_non_servis_ids[:5]),
-                "gravite": "CRITIQUE",
-                "action": "Vérifier la compatibilité véhicule/flux et la fenêtre horaire",
-            })
-
-        res = ResultatJour(
-            jour=nom_jour,
-            jour_idx=day_idx,
-            tournees=tournees,
-            postes=postes,
-            flux_transportes=flux_transportes,
-            flux_non_servis=flux_non_servis_list,
-            nb_vehicules=len(set(t.type_vehicule for t in tournees)),
-            nb_postes=len(postes),
-            km_total=km_total,
-            km_vide=km_vide,
-            nb_desinfections=nb_desinf,
-            taux_service=round(taux_svc, 1),
-            erreurs_conformite=erreurs_conformite,
-        )
-        resultats.append(res)
-        progress_bar.progress(pct_base + pct_step)
-
-    st.session_state.resultats = resultats
-    st.session_state.simulation_done = True
-    progress_bar.progress(1.0)
-    status_text.text("✅ Simulation terminée !")
-    st.success(f"Simulation de {len(resultats)} jour(s) complétée avec succès.")
-    st.rerun()
 
 
 # ============================================================================
