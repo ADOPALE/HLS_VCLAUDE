@@ -77,6 +77,49 @@ def time_to_minutes_strict(value: Any, field_name: str = "") -> int:
     return result
 
 
+def seconds_to_float_minutes(value: Any) -> Optional[float]:
+    """
+    Convertit une durée de manutention exprimée en secondes (format Excel HH:MM:SS
+    ou entier brut) en minutes flottantes.
+
+    Les colonnes "Manutention avec/sans quai (minutes / contenants)" du fichier
+    OptiFLUX contiennent des durées en SECONDES par contenant, encodées en format
+    temps Excel (ex : 00:00:15 = 15 secondes = 0.25 min/contenant).
+
+    Args:
+        value: datetime.time, int/float ou None.
+
+    Returns:
+        Float de minutes, ou None si la valeur est absente/non convertissable.
+
+    Examples:
+        >>> seconds_to_float_minutes(datetime.time(0, 0, 15))
+        0.25
+        >>> seconds_to_float_minutes(datetime.time(0, 0, 45))
+        0.75
+        >>> seconds_to_float_minutes(datetime.time(0, 1, 30))
+        1.5
+        >>> seconds_to_float_minutes(30)   # 30 secondes
+        0.5
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime.time):
+        total_seconds = value.hour * 3600 + value.minute * 60 + value.second
+        return total_seconds / 60.0
+    if isinstance(value, (int, float)):
+        import math
+        v = float(value)
+        if math.isnan(v) or math.isinf(v):
+            return None
+        # Fraction de jour Excel (ex: 0.000174 pour 15s) → convertir en minutes
+        if 0.0 < v < 1.0:
+            return v * 1440.0        # fraction jour → minutes
+        if v >= 1:
+            return v / 60.0          # valeur brute en secondes → minutes
+    return None
+
+
 # ---------------------------------------------------------------------------
 # CHARGEMENT DU FICHIER
 # ---------------------------------------------------------------------------
@@ -266,27 +309,19 @@ def parse_param_vehicules(wb: openpyxl.Workbook) -> Dict[str, Dict[str, Any]]:
             continue
 
         # Manutention sans quai : peut être "NC"
+        # Les valeurs sont en SECONDES/contenant (ex: 00:00:15 = 15s = 0.25 min/cont)
+        # seconds_to_float_minutes() convertit en minutes flottantes exactes.
         manu_sq_raw = row.get("Manutention sans quai (minutes / contenants)")
         if str(manu_sq_raw).strip().upper() == "NC":
             manu_sans_quai = None  # incompatible sites sans quai
         else:
-            manu_sans_quai = time_to_minutes(manu_sq_raw)
-            # Convertir secondes en minutes si c'était datetime.time(0,0,X)
-            if manu_sans_quai is not None and manu_sans_quai == 0:
-                # datetime.time(0,0,25) → 25 secondes → ~0.42 min → arrondi à 1
-                if isinstance(manu_sq_raw, datetime.time) and manu_sq_raw.second > 0:
-                    manu_sans_quai = max(1, round(manu_sq_raw.second / 60))
+            manu_sans_quai = seconds_to_float_minutes(manu_sq_raw)
+            # Fallback : si None (cellule vide), on met 0.0
+            if manu_sans_quai is None:
+                manu_sans_quai = 0.0
 
         manu_aq_raw = row.get("Manutention avec quai (minutes / contenants)")
-        manu_avec_quai = time_to_minutes(manu_aq_raw)
-        if manu_avec_quai is None:
-            manu_avec_quai = 0
-        elif manu_avec_quai == 0 and isinstance(manu_aq_raw, datetime.time) and manu_aq_raw.second > 0:
-            manu_avec_quai = max(1, round(manu_aq_raw.second / 60))
-
-        # Manutention sans quai : même correction secondes
-        if manu_sans_quai == 0 and isinstance(manu_sq_raw, datetime.time) and manu_sq_raw.second > 0:
-            manu_sans_quai = max(1, round(manu_sq_raw.second / 60))
+        manu_avec_quai = seconds_to_float_minutes(manu_aq_raw) or 0.0
 
         temps_quai = time_to_minutes(row.get("Temps de mise à quai - manœuvre, contact/admin (minutes)"))
         if temps_quai is None:
