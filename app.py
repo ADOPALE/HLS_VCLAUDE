@@ -111,6 +111,7 @@ def init_session():
         "simulation_done": False,
         "flux_infaisables": [],
         "fonctions_disponibles": [],
+        "params_saved": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -546,9 +547,32 @@ with tabs[1]:
                     step=1, key=f"dock_{site_name}"
                 )
                 st.session_state.dock_capacities[site_name] = cap
-                # Mettre à jour le modèle
                 if site_name in st.session_state.sites_models:
                     st.session_state.sites_models[site_name].capacite_quai = cap
+
+        # --- Bouton Enregistrer ---
+        st.markdown("---")
+        _rh = st.session_state.rh_params
+        _rh_ok = (
+            _rh.get("pause_duration", 0) < _rh.get("vacation_duration", 1)
+            and _rh.get("start_min", 0) + _rh.get("vacation_duration", 0) <= _rh.get("end_max", 1440)
+        )
+        if not _rh_ok:
+            st.error("⛔ Corrigez les paramètres RH avant d'enregistrer.")
+        else:
+            if st.button("💾 Enregistrer les paramètres", type="primary", use_container_width=True):
+                if st.session_state.raw_data:
+                    _build_models(st.session_state.raw_data)
+                st.session_state.params_saved = True
+                st.session_state.simulation_done = False
+                st.success("✅ Paramètres enregistrés — vous pouvez lancer la simulation.")
+
+        if st.session_state.get("params_saved"):
+            st.caption(
+                f"Derniers paramètres enregistrés : vacation {_rh.get('vacation_duration')} min · "
+                f"pause {_rh.get('pause_duration')} min · "
+                f"circulation +{st.session_state.circulation_factor}%"
+            )
 
 
 # ============================================================================
