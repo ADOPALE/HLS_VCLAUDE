@@ -6,6 +6,7 @@ trajets, chargements/déchargements, mises à quai, désinfections.
 """
 
 from __future__ import annotations
+import math
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -155,8 +156,8 @@ def build_route_steps(
             heure_courante += vehicule.temps_mise_quai
 
         # --- Chargement ---
-        manu_dep = vehicule.manu_avec_quai if (site_dep and site_dep.presence_quai) else (vehicule.manu_sans_quai or 0)
-        dur_chargement = manu_dep * flux.quantite
+        manu_dep = vehicule.manu_avec_quai if (site_dep and site_dep.presence_quai) else (vehicule.manu_sans_quai or 0.0)
+        dur_chargement = math.ceil(manu_dep * flux.quantite)
 
         nb_cont_charges += flux.quantite
         cont_charges[flux.type_contenant] = cont_charges.get(flux.type_contenant, 0) + flux.quantite
@@ -212,8 +213,8 @@ def build_route_steps(
             heure_courante += vehicule.temps_mise_quai
 
         # --- Déchargement ---
-        manu_arr = vehicule.manu_avec_quai if (site_arr and site_arr.presence_quai) else (vehicule.manu_sans_quai or 0)
-        dur_dechargement = manu_arr * flux.quantite
+        manu_arr = vehicule.manu_avec_quai if (site_arr and site_arr.presence_quai) else (vehicule.manu_sans_quai or 0.0)
+        dur_dechargement = math.ceil(manu_arr * flux.quantite)
 
         nb_cont_charges -= flux.quantite
         cont_charges[flux.type_contenant] = max(0, cont_charges.get(flux.type_contenant, 0) - flux.quantite)

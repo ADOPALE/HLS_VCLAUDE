@@ -168,8 +168,8 @@ def _build_models(raw: dict):
             hayon=vdata.get("hayon", False),
             compat_contenants=vdata.get("compat_contenants", {}),
             temps_mise_quai=vdata.get("temps_mise_quai", 10),
-            manu_sans_quai=vdata.get("manu_sans_quai"),
-            manu_avec_quai=vdata.get("manu_avec_quai", 1),
+            manu_sans_quai=float(vdata["manu_sans_quai"]) if vdata.get("manu_sans_quai") is not None else None,
+            manu_avec_quai=float(vdata.get("manu_avec_quai") or 0.0),
             actif=st.session_state.vehicules_actifs.get(vtype, True),
             max_exemplaires=st.session_state.max_vehicules.get(vtype),
         )

@@ -40,11 +40,11 @@ class Vehicule(BaseModel):
         description="Compatibilité par type de contenant {libellé_contenant: True/False}"
     )
     temps_mise_quai: int = Field(..., description="Temps de mise à quai en minutes")
-    manu_sans_quai: Optional[int] = Field(
+    manu_sans_quai: Optional[float] = Field(
         None,
-        description="Temps de manutention sans quai (min/contenant). None = NC (incompatible sites sans quai)"
+        description="Temps de manutention sans quai (min/contenant, float). None = NC (incompatible sites sans quai)"
     )
-    manu_avec_quai: int = Field(..., description="Temps de manutention avec quai (min/contenant)")
+    manu_avec_quai: float = Field(..., description="Temps de manutention avec quai (min/contenant, float)")
     max_exemplaires: Optional[int] = Field(None, description="Nombre max d'exemplaires autorisés (None = illimité)")
     actif: bool = Field(default=True, description="Type activé pour la simulation")
 

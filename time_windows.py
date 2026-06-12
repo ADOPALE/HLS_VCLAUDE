@@ -6,6 +6,7 @@ avant lancement de l'optimisation.
 """
 
 from __future__ import annotations
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import config
@@ -84,6 +85,7 @@ def calcul_t_min(
     manu_dep = _get_manu(vehicule, site_dep)
     manu_arr = _get_manu(vehicule, site_arr)
 
+    # Les manu sont en min/contenant (float) → produit float, arrondi global en fin
     chargement = manu_dep * flux.quantite
     dechargement = manu_arr * flux.quantite
 
@@ -94,17 +96,24 @@ def calcul_t_min(
     else:
         trajet = 0  # sites côte à côte, durée reste 0
 
-    return quai_dep + chargement + trajet + quai_arr + dechargement
+    total = quai_dep + chargement + trajet + quai_arr + dechargement
+    # Arrondi au plafond : T_min est un majorant conservateur (jamais sous-estimé)
+    return math.ceil(total)
 
 
-def _get_manu(vehicule: Vehicule, site: Optional[Site]) -> int:
-    """Retourne le temps de manutention approprié selon la présence d'un quai."""
+def _get_manu(vehicule: Vehicule, site: Optional[Site]) -> float:
+    """
+    Retourne le temps de manutention en min/contenant (float) selon la présence de quai.
+
+    Les valeurs sont issues du fichier Excel en secondes/contenant, converties en
+    minutes flottantes par seconds_to_float_minutes() lors de l'import.
+    """
     if site is None:
-        return 0
+        return 0.0
     if site.presence_quai:
         return vehicule.manu_avec_quai
     else:
-        return vehicule.manu_sans_quai or 0
+        return vehicule.manu_sans_quai or 0.0
 
 
 def detecter_flux_infaisables(
