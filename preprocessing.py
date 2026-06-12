@@ -7,12 +7,56 @@ calcule volumes et poids, et identifie les tournées mutualisées.
 
 from __future__ import annotations
 import logging
-from typing import Any, Dict, List
+import math
+from typing import Any, Dict, List, Optional
 
 import config
 from models import Flux, Contenant
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """
+    Convertit une valeur en int de façon défensive.
+
+    Retourne `default` si la valeur est None, NaN, non numérique ou non convertissable.
+    Évite les ValueError/TypeError courants avec les données Excel (NaN, None, strings vides).
+    """
+    if value is None:
+        return default
+    try:
+        f = float(value)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return int(f)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Convertit une valeur en float de façon défensive (NaN → default)."""
+    if value is None:
+        return default
+    try:
+        f = float(value)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_str(value: Any, default: str = "") -> str:
+    """Convertit une valeur en str, retourne default si None ou NaN."""
+    if value is None:
+        return default
+    try:
+        if isinstance(value, float) and math.isnan(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
 
 
 def get_active_flux(
@@ -27,73 +71,94 @@ def get_active_flux(
 
     Critères d'inclusion :
     - Nature = 'Volume' (les 'Fréquences' sont ignorés)
-    - Quantité pour le jour_idx > 0
-    - Fonction support dans la liste fonctions_incluses
+    - Quantité pour le day_idx > 0
+    - Fonction support dans fonctions_incluses
 
     Args:
         flux_brut: Liste brute des flux depuis data_loader.parse_m_flux().
         day_idx: Index du jour 0=Lundi … 6=Dimanche.
         fonctions_incluses: Fonctions support à simuler.
         contenants_data: Dict des contenants pour calcul poids/volume.
-        circulation_factor: Facteur de circulation en % (non utilisé ici, transmis au moteur).
+        circulation_factor: Facteur de circulation (non utilisé ici, transmis au moteur).
 
     Returns:
-        Liste de Flux Pydantic triés par heure de disponibilité puis par urgence.
+        Liste de Flux Pydantic triés par urgence puis heure de disponibilité.
     """
     active = []
     for f in flux_brut:
-        # Filtres primaires
-        if f.get("nature", "").strip() != config.FLUX_VOLUME:
+        # --- Filtres primaires ---
+        if _safe_str(f.get("nature")) != config.FLUX_VOLUME:
             continue
-        qty = f.get("quantites", {}).get(day_idx, 0) or 0
+
+        qty_raw = f.get("quantites", {}).get(day_idx, 0)
+        qty = _safe_int(qty_raw, 0)
         if qty <= config.MIN_QUANTITY:
             continue
-        if fonctions_incluses and f.get("fonction_support", "") not in fonctions_incluses:
-            continue
-        if not f.get("site_depart") or not f.get("site_arrivee"):
+
+        fn_support = _safe_str(f.get("fonction_support"))
+        if fonctions_incluses and fn_support not in fonctions_incluses:
             continue
 
-        # Calcul poids / volume
-        cont_name = f.get("type_contenant", "")
+        site_dep = _safe_str(f.get("site_depart"))
+        site_arr = _safe_str(f.get("site_arrivee"))
+        if not site_dep or not site_arr:
+            continue
+
+        # --- Calcul poids / volume ---
+        cont_name = _safe_str(f.get("type_contenant"))
         cont_data = contenants_data.get(cont_name, {})
-        surface_contenant = cont_data.get("longueur", 0) * cont_data.get("largeur", 0)
+        lon = _safe_float(cont_data.get("longueur"))
+        larg = _safe_float(cont_data.get("largeur"))
+        surface_contenant = lon * larg
+
+        statut_pv = _safe_str(f.get("statut_plein_vide"))
         poids_unit = (
-            cont_data.get("poids_plein", 0)
-            if f.get("statut_plein_vide", "").lower() == "plein"
-            else cont_data.get("poids_vide", 0)
+            _safe_float(cont_data.get("poids_plein"))
+            if statut_pv.lower() == "plein"
+            else _safe_float(cont_data.get("poids_vide"))
         )
 
-        heure_dispo = f.get("heure_dispo")
-        heure_max = f.get("heure_max_livraison")
+        # --- Fenêtres horaires ---
+        heure_dispo = _safe_int(f.get("heure_dispo"), config.DEFAULT_RH["start_min"])
+        heure_max = _safe_int(f.get("heure_max_livraison"), config.DEFAULT_RH["end_max"])
 
-        # Gestion des fenêtres horaires manquantes
-        if heure_dispo is None:
-            heure_dispo = config.DEFAULT_RH["start_min"]
-        if heure_max is None:
+        # Sécurité : heure_max doit être > heure_dispo
+        if heure_max <= heure_dispo:
+            logger.warning(
+                "Flux %s : heure_max (%d) ≤ heure_dispo (%d) — heure_max corrigée à end_max.",
+                f.get("id_flux"), heure_max, heure_dispo,
+            )
             heure_max = config.DEFAULT_RH["end_max"]
 
-        flux = Flux(
-            id_flux=f["id_flux"],
-            site_depart=f["site_depart"],
-            site_arrivee=f["site_arrivee"],
-            fonction_support=f.get("fonction_support", ""),
-            nature_flux=f.get("nature_flux", ""),
-            type_contenant=cont_name,
-            quantite=int(qty),
-            statut_plein_vide=f.get("statut_plein_vide", ""),
-            statut_propre_sale=f.get("statut_propre_sale", ""),
-            aller_retour=f.get("aller_retour", ""),
-            transport_mixte=f.get("transport_mixte", False),
-            regle_exclusion=f.get("regle_exclusion"),
-            tournee_mutualisee=f.get("tournee_mutualisee", False),
-            nom_tournee=f.get("nom_tournee"),
-            heure_dispo=int(heure_dispo),
-            heure_max_livraison=int(heure_max),
-            urgent=f.get("urgent", False),
-            volume_total=surface_contenant * int(qty),
-            poids_total=poids_unit * int(qty),
-        )
-        active.append(flux)
+        # --- Construction du modèle Flux ---
+        try:
+            flux = Flux(
+                id_flux=_safe_int(f.get("id_flux"), 0),
+                site_depart=site_dep,
+                site_arrivee=site_arr,
+                fonction_support=fn_support,
+                nature_flux=_safe_str(f.get("nature_flux")),
+                type_contenant=cont_name,
+                quantite=qty,
+                statut_plein_vide=statut_pv,
+                statut_propre_sale=_safe_str(f.get("statut_propre_sale")),
+                aller_retour=_safe_str(f.get("aller_retour")),
+                transport_mixte=bool(f.get("transport_mixte", False)),
+                regle_exclusion=f.get("regle_exclusion") or None,
+                tournee_mutualisee=bool(f.get("tournee_mutualisee", False)),
+                nom_tournee=f.get("nom_tournee") or None,
+                heure_dispo=heure_dispo,
+                heure_max_livraison=heure_max,
+                urgent=bool(f.get("urgent", False)),
+                volume_total=surface_contenant * qty,
+                poids_total=poids_unit * qty,
+            )
+            active.append(flux)
+        except Exception as exc:
+            logger.warning(
+                "Flux id=%s ignoré — erreur de validation Pydantic : %s",
+                f.get("id_flux", "?"), exc,
+            )
 
     # Tri : urgents d'abord, puis par heure de dispo
     active.sort(key=lambda x: (not x.urgent, x.heure_dispo))
@@ -129,8 +194,8 @@ def get_fonctions_support(flux_brut: List[Dict[str, Any]]) -> List[str]:
         Liste triée des fonctions support.
     """
     return sorted(set(
-        f.get("fonction_support", "")
+        _safe_str(f.get("fonction_support"))
         for f in flux_brut
-        if f.get("nature", "").strip() == config.FLUX_VOLUME
-        and f.get("fonction_support", "").strip()
+        if _safe_str(f.get("nature")) == config.FLUX_VOLUME
+        and _safe_str(f.get("fonction_support"))
     ))
