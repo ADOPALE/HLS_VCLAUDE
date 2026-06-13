@@ -151,7 +151,7 @@ def build_route_from_visites(
                 0, cont_charges.get(flux.type_contenant, 0) - flux.quantite
             )
             surf_chargee = _surf_chargee(cont_charges, contenants)
-            taux = (surf_chargee / surf_vehicule) if surf_vehicule > 0 else 0
+            taux = _taux_chargement(cont_charges, contenants, vehicule)
 
             steps.append(StepOperation(
                 heure_debut=heure, heure_fin=heure + dur_dech,
@@ -177,7 +177,7 @@ def build_route_from_visites(
                 cont_charges.get(flux.type_contenant, 0) + flux.quantite
             )
             surf_chargee = _surf_chargee(cont_charges, contenants)
-            taux = (surf_chargee / surf_vehicule) if surf_vehicule > 0 else 0
+            taux = _taux_chargement(cont_charges, contenants, vehicule)
 
             steps.append(StepOperation(
                 heure_debut=heure, heure_fin=heure + dur_ch,
@@ -275,10 +275,39 @@ def _surf_chargee(
     cont_charges: Dict[str, int],
     contenants: Dict[str, Contenant],
 ) -> float:
+    """Surface physique chargée (m²) — pour affichage brut."""
     return sum(
         (contenants[t].longueur * contenants[t].largeur if t in contenants else 0) * q
         for t, q in cont_charges.items()
     )
+
+
+def _taux_chargement(
+    cont_charges: Dict[str, int],
+    contenants: Dict[str, Contenant],
+    vehicule: Any,
+) -> float:
+    """
+    Taux d'utilisation du véhicule, calculé sur la capacité discrète de chaque
+    type de contenant (floor(L_veh/L_cont) × floor(l_veh/l_cont)).
+
+    Pour les chargements MONO-type : taux ≤ 1.0 toujours.
+    Pour les chargements MIXTES   : le taux est la somme pondérée des fractions
+    de capacité de chaque contenant ; peut légèrement dépasser 1.0 si le modèle
+    surfacique discret ne peut pas calculer le packing 2D combiné exact.
+    """
+    from capacity import max_contenants_par_vehicule
+    total = 0.0
+    for cont_type, qty in cont_charges.items():
+        if qty <= 0:
+            continue
+        cont = contenants.get(cont_type)
+        if cont is None:
+            continue
+        cap = max_contenants_par_vehicule(vehicule, cont)
+        if cap > 0:
+            total += qty / cap
+    return total
 
 
 def _heure_debut_optimale(visites: List[Any]) -> int:

@@ -133,6 +133,35 @@ class RoutePDTW:
                 return False
         return True
 
+    def respecte_ordre_pd(self) -> bool:
+        """
+        Vérifie que pour chaque flux (objet Python), la visite de chargement
+        apparaît STRICTEMENT AVANT la visite de déchargement.
+
+        IMPORTANT : on utilise id(flux) (identité Python) et non flux_id,
+        car les flux éclatés partagent le même flux_id mais sont des objets
+        distincts. Utiliser flux_id ferait confondre la première partie
+        (correctement ordonnée) avec une partie ultérieure potentiellement
+        inversée.
+        """
+        charge_pos: Dict[int, int] = {}   # id(flux) → premier indice de visite charge
+        decharge_pos: Dict[int, int] = {} # id(flux) → premier indice de visite décharge
+
+        for i, v in enumerate(self.visites):
+            for f in v.flux_charges:
+                obj_id = id(f)
+                if obj_id not in charge_pos:
+                    charge_pos[obj_id] = i
+            for f in v.flux_decharges:
+                obj_id = id(f)
+                if obj_id not in decharge_pos:
+                    decharge_pos[obj_id] = i
+
+        for obj_id in set(charge_pos) & set(decharge_pos):
+            if decharge_pos[obj_id] <= charge_pos[obj_id]:
+                return False
+        return True
+
     def nb_desinfections(self) -> int:
         """Nombre de désinfections nécessaires sur ce circuit."""
         etat = config.SANITAIRE_PROPRE
@@ -164,14 +193,27 @@ class RoutePDTW:
         self,
         sites: Dict[str, Site],
         matrix_dur: Dict,
+        rh: Optional[Dict] = None,
     ) -> bool:
         """
-        Vérifie que les fenêtres temporelles de tous les flux sont respectées.
-        Calcule l'heure d'arrivée effective à chaque site et vérifie la contrainte
-        heure_max_livraison pour chaque flux déchargé.
+        Vérifie :
+        1. Les fenêtres horaires de tous les flux (heure_max_livraison).
+        2. La durée totale du circuit ≤ N × vacation (N = 1 ou 2 quarts max).
+           Sans cette contrainte, le moteur crée des circuits de 14h+ sur des
+           postes de 7h30.
+        3. La séparation temporelle : un circuit ne peut pas mélanger des flux
+           dont les fenêtres sont trop éloignées (ex. 06h et 19h) car cela
+           force le chauffeur à attendre des heures entre deux opérations.
         """
+        rh = rh or config.DEFAULT_RH
+        vacation = rh.get("vacation_duration", 450)
+        end_max = rh.get("end_max", 1260)
+        # Budget temporel maximal = 2 quarts sur le même engin
+        budget_max = min(2 * vacation, end_max - rh.get("start_min", 360))
+
         depot = self.vehicule.stationnement_initial
-        heure = config.DEFAULT_RH["start_min"]
+        heure_debut_circuit = config.DEFAULT_RH["start_min"]
+        heure = heure_debut_circuit
         pos = depot
 
         for v in self.visites:
@@ -193,7 +235,7 @@ class RoutePDTW:
                 manu = (self.vehicule.manu_avec_quai if (site_obj and site_obj.presence_quai)
                         else (self.vehicule.manu_sans_quai or 0.0))
                 heure += math.ceil(manu * f.quantite)
-                # Vérification fenêtre
+                # Vérification fenêtre de livraison
                 if heure > f.heure_max_livraison:
                     return False
 
@@ -204,6 +246,25 @@ class RoutePDTW:
                 heure += math.ceil(manu * f.quantite)
 
             pos = v.site
+
+        # ── Contrainte RH : durée totale ≤ 2 × vacation ──────────────────
+        # Ajouter le retour au dépôt
+        retour = matrix_dur.get(pos, {}).get(depot, 0)
+        heure += retour
+        duree_totale = heure - heure_debut_circuit
+        if duree_totale > budget_max:
+            return False
+
+        # ── Contrainte de séparation temporelle ───────────────────────────
+        # Tous les flux d'un circuit doivent avoir des fenêtres compatibles :
+        # le temps d'attente cumulé ne doit pas dépasser MAX_ATTENTE_CIRCUIT.
+        tous_flux = [f for v in self.visites for f in v.flux_charges]
+        if len(tous_flux) > 1:
+            # Détecter les gaps temporels excessifs entre fenêtres de chargement
+            disponibs = sorted(f.heure_dispo for f in tous_flux)
+            max_gap = max(disponibs[i+1] - disponibs[i] for i in range(len(disponibs)-1))
+            if max_gap > config.MAX_GAP_HORAIRE_CIRCUIT:
+                return False
 
         return True
 
@@ -238,6 +299,7 @@ class RoutePDTW:
         contenants: Dict[str, Contenant],
         matrix_dur: Dict,
         matrix_dist: Dict,
+        rh: Optional[Dict] = None,
     ) -> bool:
         """
         Tente d'insérer un flux dans le circuit de façon optimale.
@@ -265,12 +327,21 @@ class RoutePDTW:
             charge_positions.append(("new", i))
 
         for charge_type, i_charge_raw in charge_positions:
-            # Positions pour le déchargement
+            # Positions pour le déchargement.
+            # RÈGLE : la décharge doit toujours se trouver APRÈS la charge.
+            # • charge "existing" à idx_dep → décharge à partir de idx_dep+1
+            # • charge "new" à i → décharge à partir de i (sera décalée à i+1
+            #   dans _appliquer_insertion grâce à la condition >= i_charge)
+            if charge_type == "existing":
+                decharge_min = i_charge_raw + 1
+            else:
+                decharge_min = i_charge_raw
+
             decharge_positions = []
             idx_arr = self._index_site(flux.site_arrivee)
-            if idx_arr is not None and idx_arr >= (i_charge_raw if charge_type == "existing" else i_charge_raw):
+            if idx_arr is not None and idx_arr >= decharge_min:
                 decharge_positions.append(("existing", idx_arr))
-            for j in range((i_charge_raw if charge_type == "existing" else i_charge_raw), n + 2):
+            for j in range(decharge_min, n + 2):
                 decharge_positions.append(("new", j))
 
             for decharge_type, i_decharge_raw in decharge_positions:
@@ -283,7 +354,9 @@ class RoutePDTW:
                 # Vérifications
                 if not test.respecte_capacite(contenants):
                     continue
-                if not test.respecte_temps(sites, matrix_dur):
+                if not test.respecte_ordre_pd():
+                    continue
+                if not test.respecte_temps(sites, matrix_dur, rh=rh):
                     continue
 
                 cout = test.cout_km(matrix_dist)
@@ -315,8 +388,10 @@ class RoutePDTW:
                 site=flux.site_depart,
                 flux_charges=[flux],
             ))
-            # Ajuster i_decharge si on a décalé
-            if decharge_type == "new" and i_decharge > i_charge:
+            # L'insertion d'une nouvelle visite de chargement à i_charge
+            # décale TOUTES les positions suivantes (qu'elles soient "new" ou
+            # "existing"). On doit donc ajuster i_decharge dans les deux cas.
+            if i_decharge >= i_charge:
                 i_decharge += 1
 
         if decharge_type == "existing":
@@ -634,6 +709,14 @@ def _oropt_improvement(
                 if flux is None:
                     continue
 
+                # Flux éclaté en plusieurs parties (même id_flux) : OR-opt ne
+                # peut pas les déplacer individuellement car retirer_flux
+                # supprimerait toutes les parties. Laisser au 2-opt.
+                n_parts = sum(1 for v in r_src.visites
+                              for f in v.flux_charges if f.id_flux == flux_id)
+                if n_parts > 1:
+                    continue
+
                 cout_src_avant = r_src.cout_km(matrix_dist)
 
                 # Simuler le retrait
@@ -722,10 +805,23 @@ def _twoopt_improvement(
                 r1t.visites.append(first_r2)
                 r2t.visites.insert(0, last_r1)
 
+                # Vérification inter-routes : s'assurer qu'aucun flux n'a sa
+                # charge dans r1t et sa décharge dans r2t (ou inversement).
+                # Sans ce contrôle, le 2-opt peut séparer pickup et delivery
+                # d'un même flux éclaté dans deux routes distinctes.
+                r1t_ch = {id(f) for v in r1t.visites for f in v.flux_charges}
+                r2t_ch = {id(f) for v in r2t.visites for f in v.flux_charges}
+                r1t_de = {id(f) for v in r1t.visites for f in v.flux_decharges}
+                r2t_de = {id(f) for v in r2t.visites for f in v.flux_decharges}
+                if (r1t_ch & r2t_de) or (r2t_ch & r1t_de):
+                    continue  # Cet échange briserait une paire P-D
+
                 if (r1t.respecte_capacite(contenants)
                         and r2t.respecte_capacite(contenants)
+                        and r1t.respecte_ordre_pd()
+                        and r2t.respecte_ordre_pd()
                         and r1t.respecte_temps(sites, matrix_dur)
-                        and r2t.respecte_temps(sites, matrix_dur)):
+                        and r2t.respecte_temps(sites, matrix_dur)):  # rh=None → DEFAULT_RH
                     cout_apres = r1t.cout_km(matrix_dist) + r2t.cout_km(matrix_dist)
                     pen = ((r1t.nb_desinfections() + r2t.nb_desinfections())
                            - (r1.nb_desinfections() + r2.nb_desinfections())) * 50

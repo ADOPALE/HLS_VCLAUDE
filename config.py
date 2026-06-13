@@ -109,6 +109,12 @@ PRISE_DE_POSTE_MIN = 15
 FIN_DE_POSTE_MIN = 10
 DESINFECTION_DURATION = 15
 OPTIMIZATION_BUDGET_SEC = 600   # 10 minutes — moteur VRPPDTW
+
+# Gap horaire max entre deux flux dans le même circuit.
+# Si les heure_dispo de deux flux dans un même circuit sont séparées de plus
+# de MAX_GAP_HORAIRE_CIRCUIT minutes, ils seront dans des circuits distincts.
+# Évite les circuits 06h00 + RESTAURATION 15h30 = 9h d'attente.
+MAX_GAP_HORAIRE_CIRCUIT = 240  # 4 heures   # 10 minutes — moteur VRPPDTW
 PAUSE_WINDOW_HOURS = 60
 LOOK_FORWARD_MIN = 30
 
