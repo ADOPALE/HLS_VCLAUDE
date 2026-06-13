@@ -259,7 +259,7 @@ class TestDetecterFluxInfaisables:
         sites = {"HSJ": site_avec_quai, "HGRL": site_sans_quai}
         infaisables = detecter_flux_infaisables([flux], vehicules, sites, matrix_dur)
         assert len(infaisables) == 1
-        assert infaisables[0]["raison"] == "Aucun véhicule compatible avec ce flux"
+        assert infaisables[0]["raison"] == "Aucun véhicule compatible"
 
     def test_liste_vide(self, vehicules_dict, sites_dict, matrix_dur):
         """Aucun flux → aucun infaisable."""
