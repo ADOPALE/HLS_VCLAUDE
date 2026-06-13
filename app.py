@@ -253,7 +253,7 @@ def _run_simulation(jours_a_simuler: list, fns_actives: list):
         status_text.text(f"{nom_jour} — Affectation des postes chauffeurs…")
         progress_bar.progress(pct_base + pct_step * 0.90)
 
-        postes = affecter_postes(
+        postes, erreurs_rh = affecter_postes(
             tournees,
             st.session_state.vehicules_models,
             st.session_state.rh_params,
@@ -282,7 +282,8 @@ def _run_simulation(jours_a_simuler: list, fns_actives: list):
         km_vide = sum(t.km_vide for t in tournees)
         nb_desinf = sum(t.nb_desinfections for t in tournees)
 
-        erreurs_conformite = []
+        # Conformité : quais + RH + flux non servis
+        erreurs_conformite = list(erreurs_rh)  # dépassements amplitude
         for c in conflits:
             erreurs_conformite.append({
                 "type": "CONFLIT_QUAI",
@@ -292,7 +293,6 @@ def _run_simulation(jours_a_simuler: list, fns_actives: list):
                 "gravite": "MOYEN",
                 "action": "Décaler les créneaux de livraison sur ce site",
             })
-
         if flux_non_servis_list:
             erreurs_conformite.append({
                 "type": "FLUX_NON_SERVIS",
@@ -310,7 +310,8 @@ def _run_simulation(jours_a_simuler: list, fns_actives: list):
             postes=postes,
             flux_transportes=flux_transportes,
             flux_non_servis=flux_non_servis_list,
-            nb_vehicules=len(set(t.type_vehicule for t in tournees)),
+            # 1 poste = 1 véhicule physique
+            nb_vehicules=len(postes),
             nb_postes=len(postes),
             km_total=km_total,
             km_vide=km_vide,

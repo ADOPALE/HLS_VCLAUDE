@@ -1,19 +1,24 @@
 """
 driver_scheduler.py — Affectation des postes chauffeurs OptiFLUX.
 
-Calcule les postes de travail à partir des tournées, en respectant :
-- Durée exacte de vacation
-- Pause au milieu ±1h au stationnement initial
-- Prise de poste (15 min) et fin de poste (10 min)
-- Changement de chauffeur au stationnement initial uniquement
+1 poste = 1 vacation = 1 véhicule physique.
+
+Algorithme :
+  - Trier les tournées de chaque type de véhicule par heure de début.
+  - Remplir chaque poste avec des tournées consécutives tant que le temps
+    utile disponible le permet (vacation − prise_poste − fin_poste − pause).
+  - Ouvrir un nouveau poste (= nouveau véhicule physique) dès qu'une tournée
+    ne rentre plus.
+  - Signaler une erreur de conformité si le poste dépasse end_max.
 """
 
 from __future__ import annotations
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import config
 from models import Tournee, PosteChaufeur, StepOperation, Vehicule
+from time_windows import minutes_to_hhmm
 
 logger = logging.getLogger(__name__)
 
@@ -22,93 +27,107 @@ def affecter_postes(
     tournees: List[Tournee],
     vehicules: Dict[str, Vehicule],
     rh: Dict[str, int],
-) -> List[PosteChaufeur]:
+) -> Tuple[List[PosteChaufeur], List[Dict[str, Any]]]:
     """
     Affecte les tournées à des postes chauffeurs en respectant les contraintes RH.
 
-    Chaque véhicule peut avoir 1 ou 2 postes dans la journée.
-    Les postes durent exactement la durée de vacation.
-    La pause est positionnée dans la fenêtre ±1h autour du milieu du poste.
-
     Args:
-        tournees: Liste des tournées calculées par l'optimiseur.
+        tournees: Liste des tournées construites par l'optimiseur.
         vehicules: Dict des véhicules.
-        rh: Paramètres RH {vacation_duration, pause_duration, start_min, end_max}.
+        rh: Paramètres RH.
 
     Returns:
-        Liste de PosteChaufeur.
+        Tuple (postes, erreurs_conformite).
+        erreurs_conformite contient les dépassements d'amplitude horaire.
     """
     vacation = rh["vacation_duration"]
     pause_dur = rh["pause_duration"]
     start_min = rh["start_min"]
     end_max = rh["end_max"]
 
-    # Grouper les tournées par véhicule
-    tournees_par_veh: Dict[str, List[Tournee]] = {}
+    # Temps utile disponible par poste (hors overhead fixe)
+    overhead = config.PRISE_DE_POSTE_MIN + config.FIN_DE_POSTE_MIN + pause_dur
+    max_utile = max(0, vacation - overhead)
+
+    # Grouper les tournées par type de véhicule
+    par_veh: Dict[str, List[Tournee]] = {}
     for t in tournees:
-        tournees_par_veh.setdefault(t.type_vehicule, []).append(t)
+        par_veh.setdefault(t.type_vehicule, []).append(t)
 
     postes: List[PosteChaufeur] = []
+    erreurs: List[Dict[str, Any]] = []
     poste_id = 1
 
-    for vtype, t_list in tournees_par_veh.items():
+    for vtype, t_list in par_veh.items():
         veh = vehicules.get(vtype)
         if not veh:
             continue
 
-        # Trier les tournées par heure de début
+        # Tri par heure de début
         t_list.sort(key=lambda t: t.heure_debut)
 
-        # Calculer le début optimal du 1er poste
-        premier_debut = max(start_min, t_list[0].heure_debut - config.PRISE_DE_POSTE_MIN)
-        # Arrondir à start_min si possible
-        if premier_debut < start_min:
-            premier_debut = start_min
+        # Remplissage glouton des postes
+        pending = list(t_list)
+        num_poste = 1
 
-        poste_debut = premier_debut
-        poste_fin = poste_debut + vacation
+        while pending:
+            panier: List[Tournee] = []
+            temps_utile = 0
 
-        if poste_fin > end_max:
-            # Pas de place pour ce poste → ajuster
-            poste_debut = end_max - vacation
-            poste_fin = end_max
+            # Remplir le poste avec des tournées consécutives
+            for t in pending:
+                dur = t.heure_fin - t.heure_debut
+                if temps_utile + dur <= max_utile:
+                    panier.append(t)
+                    temps_utile += dur
+                else:
+                    break  # Arrêt dès que la prochaine ne rentre plus
 
-        # Poste 1
-        poste1 = _creer_poste(
-            poste_id=poste_id,
-            numero=1,
-            vtype=vtype,
-            veh=veh,
-            debut=poste_debut,
-            fin=poste_fin,
-            vacation=vacation,
-            pause_dur=pause_dur,
-            tournees=[t for t in t_list if t.heure_debut < poste_fin],
-        )
-        postes.append(poste1)
-        poste_id += 1
+            # Forcer au moins une tournée (même si elle dépasse seule)
+            if not panier:
+                panier = [pending[0]]
 
-        # Poste 2 si nécessaire et possible
-        tournees_restantes = [t for t in t_list if t.heure_debut >= poste_fin]
-        if tournees_restantes:
-            debut2 = poste_fin
-            fin2 = debut2 + vacation
-            if fin2 <= end_max:
-                poste2 = _creer_poste(
-                    poste_id=poste_id,
-                    numero=2,
-                    vtype=vtype,
-                    veh=veh,
-                    debut=debut2,
-                    fin=fin2,
-                    vacation=vacation,
-                    pause_dur=pause_dur,
-                    tournees=tournees_restantes,
-                )
-                postes.append(poste2)
-                poste_id += 1
+            pending = pending[len(panier):]
 
-    return postes
+            # Calcul des bornes du poste
+            premier_debut = panier[0].heure_debut
+            poste_debut = max(start_min, premier_debut - config.PRISE_DE_POSTE_MIN)
+            poste_fin = poste_debut + vacation
+
+            # Vérification amplitude
+            if poste_fin > end_max:
+                erreurs.append({
+                    "type": "AMPLITUDE_DEPASSEE",
+                    "statut": "ERREUR",
+                    "detail": (
+                        f"{vtype} — poste #{num_poste} : "
+                        f"fin estimée {minutes_to_hhmm(poste_fin)} > "
+                        f"fin max {minutes_to_hhmm(end_max)}"
+                    ),
+                    "concerne": vtype,
+                    "gravite": "CRITIQUE",
+                    "action": (
+                        "Augmenter le nombre de véhicules de ce type "
+                        "ou élargir la plage horaire."
+                    ),
+                })
+
+            poste = _creer_poste(
+                poste_id=poste_id,
+                numero=num_poste,
+                vtype=vtype,
+                veh=veh,
+                debut=poste_debut,
+                fin=poste_fin,
+                vacation=vacation,
+                pause_dur=pause_dur,
+                tournees=panier,
+            )
+            postes.append(poste)
+            poste_id += 1
+            num_poste += 1
+
+    return postes, erreurs
 
 
 def _creer_poste(
@@ -122,14 +141,27 @@ def _creer_poste(
     pause_dur: int,
     tournees: List[Tournee],
 ) -> PosteChaufeur:
-    """Crée un poste chauffeur avec séquence d'opérations."""
+    """
+    Crée un poste chauffeur avec la séquence d'opérations.
+
+    Séquence :
+    1. Prise de poste au stationnement initial
+    2. Pour chaque tournée : toutes ses étapes (ajustées dans le temps)
+       La pause est insérée dès que possible dans la fenêtre ±1h autour
+       du milieu du poste, quand le véhicule est au stationnement initial.
+    3. Temps inoccupé éventuel
+    4. Fin de poste
+    """
     steps: List[StepOperation] = []
     heure = debut
+
+    # Compteurs de temps
     temps_conduite = 0
     temps_manutention = 0
     temps_quai_total = 0
     temps_desinfection = 0
     temps_attente = 0
+    temps_inoccupe = 0
 
     # Prise de poste
     steps.append(StepOperation(
@@ -140,19 +172,25 @@ def _creer_poste(
     ))
     heure += config.PRISE_DE_POSTE_MIN
 
-    # Milieu du poste pour positionnement de la pause
-    milieu_poste = debut + vacation // 2
-    pause_window_start = milieu_poste - config.PAUSE_WINDOW_HOURS
-    pause_window_end = milieu_poste + config.PAUSE_WINDOW_HOURS
-    pause_insere = False
+    # Fenêtre de pause (±1h autour du milieu du poste)
+    milieu = debut + vacation // 2
+    pause_window_start = milieu - config.PAUSE_WINDOW_HOURS
+    pause_window_end = milieu + config.PAUSE_WINDOW_HOURS
+    pause_inseree = False
 
-    # Intégrer les opérations des tournées
-    for t in tournees:
-        for step in t.steps:
-            # Insérer pause si on est dans la fenêtre et au stationnement initial
-            if (not pause_insere
-                    and step.site == veh.stationnement_initial
-                    and pause_window_start <= heure <= pause_window_end):
+    # Intégrer les étapes de chaque tournée
+    for tournee in tournees:
+        for step in tournee.steps:
+            dur = step.heure_fin - step.heure_debut
+            if dur <= 0:
+                continue
+
+            # Insérer la pause si on est dans la fenêtre et au stationnement
+            if (
+                not pause_inseree
+                and step.site == veh.stationnement_initial
+                and pause_window_start <= heure <= pause_window_end
+            ):
                 steps.append(StepOperation(
                     heure_debut=heure,
                     heure_fin=heure + pause_dur,
@@ -160,11 +198,11 @@ def _creer_poste(
                     site=veh.stationnement_initial,
                 ))
                 heure += pause_dur
-                pause_insere = True
+                pause_inseree = True
 
-            adj_step = StepOperation(
+            adj = StepOperation(
                 heure_debut=heure,
-                heure_fin=heure + (step.heure_fin - step.heure_debut),
+                heure_fin=heure + dur,
                 type_operation=step.type_operation,
                 site=step.site,
                 flux_ids=step.flux_ids,
@@ -176,11 +214,9 @@ def _creer_poste(
                 est_trajet_vide=step.est_trajet_vide,
                 commentaire=step.commentaire,
             )
-            dur = step.heure_fin - step.heure_debut
-            steps.append(adj_step)
+            steps.append(adj)
             heure += dur
 
-            # Accumulation des temps
             if step.type_operation in (config.OP_TRAJET_VIDE, config.OP_TRAJET_CHARGE):
                 temps_conduite += dur
             elif step.type_operation in (config.OP_CHARGEMENT, config.OP_DECHARGEMENT):
@@ -192,8 +228,8 @@ def _creer_poste(
             elif step.type_operation == config.OP_ATTENTE:
                 temps_attente += dur
 
-    # Pause si pas encore insérée
-    if not pause_insere:
+    # Pause hors fenêtre si non insérée
+    if not pause_inseree:
         steps.append(StepOperation(
             heure_debut=heure,
             heure_fin=heure + pause_dur,
@@ -203,15 +239,16 @@ def _creer_poste(
         heure += pause_dur
 
     # Temps inoccupé avant fin de poste
-    temps_inoccupe = max(0, fin - config.FIN_DE_POSTE_MIN - heure)
-    if temps_inoccupe > 0:
+    fin_travail = fin - config.FIN_DE_POSTE_MIN
+    if heure < fin_travail:
+        temps_inoccupe = fin_travail - heure
         steps.append(StepOperation(
             heure_debut=heure,
-            heure_fin=heure + temps_inoccupe,
+            heure_fin=fin_travail,
             type_operation=config.OP_INOCCUPE,
             site=veh.stationnement_initial,
         ))
-        heure += temps_inoccupe
+        heure = fin_travail
 
     # Fin de poste
     steps.append(StepOperation(

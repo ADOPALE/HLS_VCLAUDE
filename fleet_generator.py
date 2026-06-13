@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from config import DOCK_CAPACITY_DEFAULT, DOCK_CAPACITY_OVERRIDES
+from config import DEFAULT_DOCK_CAPACITY as DOCK_CAPACITY_DEFAULT, SITE_DOCK_OVERRIDES as DOCK_CAPACITY_OVERRIDES
 from models import Site, Vehicule, Contenant
 
 logger = logging.getLogger(__name__)

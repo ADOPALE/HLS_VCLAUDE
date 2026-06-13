@@ -219,6 +219,13 @@ def build_route_steps(
         nb_cont_charges -= flux.quantite
         cont_charges[flux.type_contenant] = max(0, cont_charges.get(flux.type_contenant, 0) - flux.quantite)
 
+        # Recalcul du taux APRÈS déchargement (charge courante mise à jour)
+        surf_apres = sum(
+            (contenants[t].longueur * contenants[t].largeur if t in contenants else 0) * q
+            for t, q in cont_charges.items()
+        )
+        taux_apres = (surf_apres / surf_vehicule) if surf_vehicule > 0 else 0
+
         steps.append(StepOperation(
             heure_debut=heure_courante,
             heure_fin=heure_courante + dur_dechargement,
@@ -227,6 +234,7 @@ def build_route_steps(
             flux_ids=[flux.id_flux],
             nb_contenants=flux.quantite,
             type_contenant=flux.type_contenant,
+            taux_remplissage_surface=round(taux_apres, 3),
             statut_sanitaire=etat_sanitaire,
         ))
         heure_courante += dur_dechargement

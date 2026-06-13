@@ -96,7 +96,9 @@ def generate_excel_results(
         for vt, stats in sorted(veh_counts.items()):
             fm = fmt_row(row)
             km_plein = stats["km"] - stats["km_vide"]
-            taux_util = (stats["temps"] / rh.get("vacation_duration", 450)) * 100 if rh.get("vacation_duration") else 0
+            # Taux = nb tournées × durée moy / (nb postes × vacation)
+            # Approximation : stats["temps"] = somme des durées tournées
+            taux_util = min(100.0, (stats["temps"] / (stats["nb"] * max(rh.get("vacation_duration", 450), 1)) * 100)) if stats["nb"] else 0
             ws.write_row(row, 0, [
                 res.jour, vt, stats["nb"], stats["tournees"],
                 round(stats["km"], 1), round(km_plein, 1), round(stats["km_vide"], 1),
@@ -113,17 +115,20 @@ def generate_excel_results(
         "Jour", "Poste", "Véhicule", "Heure début", "Heure fin", "Durée (min)",
         "Prise de poste (min)", "Fin de poste (min)", "Pause (min)",
         "Conduite (min)", "Manutention (min)", "Quai (min)",
-        "Désinfection (min)", "Attente (min)", "Inoccupé (min)", "Taux occupation (%)",
+        "Désinfection (min)", "Attente (min)", "Inoccupé (min)",
+        "Taux occupation (%)", "Taux inoccupé (%)",
     ]
     _write_headers(ws2, headers2, fmt_header)
     row2 = 1
     for res in resultats:
         for poste in res.postes:
             fm = fmt_row(row2)
-            taux_occ = (
-                (poste.temps_conduite + poste.temps_manutention + poste.temps_quai) /
-                max(poste.duree_vacation, 1) * 100
-            )
+            vac = max(poste.duree_vacation, 1)
+            taux_occ = min(100.0, round(
+                (poste.temps_conduite + poste.temps_manutention +
+                 poste.temps_quai + poste.temps_desinfection) / vac * 100, 1
+            ))
+            taux_inocc = min(100.0, round(poste.temps_inoccupe / vac * 100, 1))
             ws2.write_row(row2, 0, [
                 res.jour, poste.id_poste, poste.type_vehicule,
                 minutes_to_hhmm(poste.heure_debut), minutes_to_hhmm(poste.heure_fin),
@@ -131,7 +136,7 @@ def generate_excel_results(
                 poste.temps_prise_poste, poste.temps_fin_poste, poste.temps_pause,
                 poste.temps_conduite, poste.temps_manutention, poste.temps_quai,
                 poste.temps_desinfection, poste.temps_attente, poste.temps_inoccupe,
-                round(taux_occ, 1),
+                taux_occ, taux_inocc,
             ], fm)
             row2 += 1
     ws2.set_column(0, len(headers2) - 1, 14)
@@ -292,6 +297,70 @@ def generate_excel_results(
             ], fm)
             row7 += 1
     ws7.set_column(0, len(headers7) - 1, 22)
+
+    # --- Onglet Planning chauffeurs (détail chronologique) ---
+    ws_pc = wb.add_worksheet(config.EXPORT_SHEETS["planning_chauffeurs"])
+    headers_pc = [
+        "Jour", "Poste", "Véhicule", "Ordre",
+        "Heure début", "Heure fin", "Durée (min)",
+        "Type opération", "Site", "Flux IDs",
+        "Nb contenants", "Taux rempl. surf. (%)", "Statut sanitaire",
+    ]
+    _write_headers(ws_pc, headers_pc, fmt_header)
+    row_pc = 1
+    for res in resultats:
+        for poste in res.postes:
+            for k, step in enumerate(poste.steps):
+                fm = fmt_row(row_pc)
+                ws_pc.write_row(row_pc, 0, [
+                    res.jour,
+                    poste.id_poste,
+                    poste.type_vehicule,
+                    k + 1,
+                    minutes_to_hhmm(step.heure_debut),
+                    minutes_to_hhmm(step.heure_fin),
+                    step.heure_fin - step.heure_debut,
+                    step.type_operation,
+                    step.site,
+                    ", ".join(str(i) for i in step.flux_ids) if step.flux_ids else "",
+                    step.nb_contenants,
+                    f"{step.taux_remplissage_surface * 100:.0f}%" if step.taux_remplissage_surface else "0%",
+                    step.statut_sanitaire,
+                ], fm)
+                row_pc += 1
+    ws_pc.set_column(0, len(headers_pc) - 1, 16)
+
+    # --- Onglet Planning quais ---
+    ws_pq = wb.add_worksheet(config.EXPORT_SHEETS["planning_quais"])
+    headers_pq = [
+        "Jour", "Site", "Capacité quai",
+        "Heure arrivée", "Heure début quai", "Heure fin quai",
+        "Durée quai (min)", "Véhicule", "Poste",
+        "Flux IDs",
+    ]
+    _write_headers(ws_pq, headers_pq, fmt_header)
+    row_pq = 1
+    for res in resultats:
+        for poste in res.postes:
+            for step in poste.steps:
+                if step.type_operation != config.OP_MISE_A_QUAI:
+                    continue
+                dur_q = step.heure_fin - step.heure_debut
+                fm = fmt_row(row_pq)
+                ws_pq.write_row(row_pq, 0, [
+                    res.jour,
+                    step.site,
+                    "",  # capacité non disponible ici
+                    minutes_to_hhmm(step.heure_debut),
+                    minutes_to_hhmm(step.heure_debut),
+                    minutes_to_hhmm(step.heure_fin),
+                    dur_q,
+                    poste.type_vehicule,
+                    poste.id_poste,
+                    ", ".join(str(i) for i in step.flux_ids) if step.flux_ids else "",
+                ], fm)
+                row_pq += 1
+    ws_pq.set_column(0, len(headers_pq) - 1, 18)
 
     wb.close()
     output.seek(0)
