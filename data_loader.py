@@ -517,6 +517,19 @@ def parse_m_flux(wb: openpyxl.Workbook) -> List[Dict[str, Any]]:
         tournee_raw = str(row.get("Tournées mutualisées ? (OUI / NON)", "NON")).strip().upper()
         urgence_raw = str(row.get("Urgence / flux prioritaire \n(Oui/Non)", "Non")).strip().upper()
 
+        def _ns(v):
+            """nullable_str : convertit nan/None en None, sinon str stripped."""
+            if v is None:
+                return None
+            import math
+            try:
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    return None
+            except (TypeError, ValueError):
+                pass
+            s = str(v).strip()
+            return s if s else None
+
         flux_list.append({
             "id_flux": int(idx) + 2,  # +2 : ligne Excel (header=1, data commence à 2)
             "site_depart": str(row.get("Point de départ", "")).strip(),
@@ -528,9 +541,9 @@ def parse_m_flux(wb: openpyxl.Workbook) -> List[Dict[str, Any]]:
             "statut_propre_sale": str(row.get("Sale / propre", "")).strip(),
             "aller_retour": str(row.get("Aller/Retour", "") or "").strip(),
             "transport_mixte": transport_mixte_raw == "OUI",
-            "regle_exclusion": row.get("Règles d'exclusions si transport mixte") or None,
+            "regle_exclusion": _ns(row.get("Règles d'exclusions si transport mixte")),
             "tournee_mutualisee": tournee_raw == "OUI",
-            "nom_tournee": row.get("Nom de la tournée mutualisée le cas échéant") or None,
+            "nom_tournee": _ns(row.get("Nom de la tournée mutualisée le cas échéant")),
             "nature": str(row.get(col_nature, "") or "").strip(),
             "quantites": quantites,
             "heure_dispo": heure_dispo,

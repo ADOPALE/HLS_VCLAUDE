@@ -144,9 +144,11 @@ def get_active_flux(
                 statut_propre_sale=_safe_str(f.get("statut_propre_sale")),
                 aller_retour=_safe_str(f.get("aller_retour")),
                 transport_mixte=bool(f.get("transport_mixte", False)),
-                regle_exclusion=f.get("regle_exclusion") or None,
+                # NaN pandas est truthy → `nan or None` = nan, Pydantic rejette
+                # _safe_str convertit nan en "" puis `or None` donne None
+                regle_exclusion=_safe_str(f.get("regle_exclusion")) or None,
                 tournee_mutualisee=bool(f.get("tournee_mutualisee", False)),
-                nom_tournee=f.get("nom_tournee") or None,
+                nom_tournee=_safe_str(f.get("nom_tournee")) or None,
                 heure_dispo=heure_dispo,
                 heure_max_livraison=heure_max,
                 urgent=bool(f.get("urgent", False)),
