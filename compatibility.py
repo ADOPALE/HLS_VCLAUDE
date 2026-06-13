@@ -44,8 +44,11 @@ def vehicule_compatible_flux(
             return False
         if not site.compat_vehicules.get(vehicule.type_vehicule, False):
             return False
-        # 4. Site sans quai
-        if not site.presence_quai and not vehicule.peut_operer_sans_quai:
+        # 4. Site sans quai : critère = manu_sans_quai renseigné (pas NC).
+        # La présence d'un hayon n'est PAS requise : param Sites déclare déjà
+        # quels véhicules peuvent accéder au site. Il suffit que le véhicule ait
+        # une procédure de manutention sans quai (manu_sans_quai ≠ None).
+        if not site.presence_quai and vehicule.manu_sans_quai is None:
             return False
 
     return True

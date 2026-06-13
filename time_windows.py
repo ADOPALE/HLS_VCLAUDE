@@ -116,6 +116,47 @@ def _get_manu(vehicule: Vehicule, site: Optional[Site]) -> float:
         return vehicule.manu_sans_quai or 0.0
 
 
+def _detail_t_min(
+    flux: Flux,
+    vehicule: Vehicule,
+    sites: Dict[str, Site],
+    matrix_dur: Dict[str, Dict[str, float]],
+    circulation_factor: float = 0.0,
+) -> Dict[str, Any]:
+    """Retourne le détail complet du calcul T_min pour un flux/véhicule."""
+    site_dep = sites.get(flux.site_depart)
+    site_arr = sites.get(flux.site_arrivee)
+
+    quai_dep = vehicule.temps_mise_quai if (site_dep and site_dep.presence_quai) else 0
+    quai_arr = vehicule.temps_mise_quai if (site_arr and site_arr.presence_quai) else 0
+    manu_dep = _get_manu(vehicule, site_dep)
+    manu_arr = _get_manu(vehicule, site_arr)
+
+    trajet_brut = matrix_dur.get(flux.site_depart, {}).get(flux.site_arrivee, 0.0)
+    trajet = round(trajet_brut * (1 + circulation_factor / 100)) if trajet_brut > 0 else 0
+
+    chargement = manu_dep * flux.quantite
+    dechargement = manu_arr * flux.quantite
+    total = quai_dep + chargement + trajet + quai_arr + dechargement
+
+    return {
+        "vehicule": vehicule.type_vehicule,
+        "quai_dep_min": quai_dep,
+        "manu_dep_min_cont": round(manu_dep, 4),
+        "chargement_min": round(chargement, 2),
+        "trajet_min": trajet,
+        "quai_arr_min": quai_arr,
+        "manu_arr_min_cont": round(manu_arr, 4),
+        "dechargement_min": round(dechargement, 2),
+        "t_min_total": math.ceil(total),
+        "detail_formule": (
+            f"quai_dep({quai_dep}) + charg({round(manu_dep,3)}×{flux.quantite}={round(chargement,1)}) + "
+            f"trajet({trajet}) + quai_arr({quai_arr}) + decharg({round(manu_arr,3)}×{flux.quantite}={round(dechargement,1)}) "
+            f"= {math.ceil(total)} min"
+        ),
+    }
+
+
 def detecter_flux_infaisables(
     flux_actifs: List[Flux],
     vehicules: Dict[str, Vehicule],
@@ -124,54 +165,48 @@ def detecter_flux_infaisables(
     circulation_factor: float = 0.0,
 ) -> List[Dict[str, Any]]:
     """
-    Détecte les flux dont la fenêtre horaire est insuffisante pour être exécutés.
+    Détecte les flux dont la fenêtre horaire est insuffisante.
 
-    Pour chaque flux, calcule T_min avec le véhicule compatible le plus favorable
-    (temps de manutention le plus faible). Si T_min > fenêtre disponible,
-    le flux est marqué infaisable.
-
-    Args:
-        flux_actifs: Liste des flux actifs du jour.
-        vehicules: Dict des véhicules.
-        sites: Dict des sites.
-        matrix_dur: Matrice durées.
-        circulation_factor: Facteur de circulation (%).
-
-    Returns:
-        Liste de dicts décrivant les flux infaisables :
-        {id_flux, site_depart, site_arrivee, quantite, t_min, fenetre_disponible,
-         ecart, fenetre_min_requise, heure_dispo_str, heure_max_str}
+    Pour chaque flux, calcule T_min avec le véhicule compatible le plus favorable.
+    Retourne le détail complet du calcul pour chaque infaisable.
     """
     from compatibility import get_vehicules_compatibles_flux
 
     infaisables = []
     for flux in flux_actifs:
         compat_types = get_vehicules_compatibles_flux(flux, vehicules, sites)
+        fenetre = flux.heure_max_livraison - flux.heure_dispo
+
         if not compat_types:
+            # Diagnostiquer la raison de l'incompatibilité
+            raison_detail = _diagnostiquer_incompatibilite(flux, vehicules, sites)
             infaisables.append({
                 "id_flux": flux.id_flux,
                 "site_depart": flux.site_depart,
                 "site_arrivee": flux.site_arrivee,
                 "quantite": flux.quantite,
                 "t_min": -1,
-                "fenetre_disponible": flux.heure_max_livraison - flux.heure_dispo,
+                "fenetre_disponible": fenetre,
                 "ecart": -1,
                 "fenetre_min_requise": -1,
                 "heure_dispo_str": minutes_to_hhmm(flux.heure_dispo),
                 "heure_max_str": minutes_to_hhmm(flux.heure_max_livraison),
-                "raison": "Aucun véhicule compatible avec ce flux",
+                "raison": "Aucun véhicule compatible",
+                "raison_detail": raison_detail,
+                "detail_calcul": "",
             })
             continue
 
-        # Trouver le T_min le plus optimiste (véhicule avec manu la plus rapide)
+        # Trouver le T_min le plus optimiste et son détail
         t_min_best = None
+        detail_best = None
         for vtype in compat_types:
             veh = vehicules[vtype]
-            t = calcul_t_min(flux, veh, sites, matrix_dur, circulation_factor)
-            if t_min_best is None or t < t_min_best:
-                t_min_best = t
+            d = _detail_t_min(flux, veh, sites, matrix_dur, circulation_factor)
+            if t_min_best is None or d["t_min_total"] < t_min_best:
+                t_min_best = d["t_min_total"]
+                detail_best = d
 
-        fenetre = flux.heure_max_livraison - flux.heure_dispo
         if t_min_best is not None and t_min_best > fenetre:
             infaisables.append({
                 "id_flux": flux.id_flux,
@@ -185,9 +220,54 @@ def detecter_flux_infaisables(
                 "heure_dispo_str": minutes_to_hhmm(flux.heure_dispo),
                 "heure_max_str": minutes_to_hhmm(flux.heure_max_livraison),
                 "raison": f"T_min={t_min_best} min > fenêtre={fenetre} min",
+                "raison_detail": f"Véhicule le + favorable : {detail_best['vehicule']}",
+                "detail_calcul": detail_best["detail_formule"],
             })
 
     return infaisables
+
+
+def _diagnostiquer_incompatibilite(
+    flux: Flux,
+    vehicules: Dict[str, Vehicule],
+    sites: Dict[str, Site],
+) -> str:
+    """Explique pourquoi aucun véhicule n'est compatible avec un flux."""
+    site_dep = sites.get(flux.site_depart)
+    site_arr = sites.get(flux.site_arrivee)
+
+    if site_dep is None:
+        return f"Site départ '{flux.site_depart}' absent de param Sites"
+    if site_arr is None:
+        return f"Site arrivée '{flux.site_arrivee}' absent de param Sites"
+
+    raisons = []
+    for vtype, veh in vehicules.items():
+        if not veh.compat_contenants.get(flux.type_contenant, False):
+            raisons.append(f"{vtype}:contenant_incompatible")
+            continue
+        for sname, site in [(flux.site_depart, site_dep), (flux.site_arrivee, site_arr)]:
+            if not site.compat_vehicules.get(vtype, False):
+                raisons.append(f"{vtype}:site_{sname}_incompatible")
+                break
+            if not site.presence_quai and veh.manu_sans_quai is None:
+                raisons.append(f"{vtype}:manu_sans_quai=NC_pour_{sname}")
+                break
+
+    if raisons:
+        # Synthétiser
+        cont_pb = [r for r in raisons if "contenant" in r]
+        site_pb = [r for r in raisons if "site_" in r]
+        manu_pb = [r for r in raisons if "manu_" in r]
+        parts = []
+        if cont_pb:
+            parts.append(f"Contenant '{flux.type_contenant}' incompatible avec {len(cont_pb)} véhicule(s)")
+        if site_pb:
+            parts.append(f"Site non déclaré compatible pour {len(site_pb)} véhicule(s)")
+        if manu_pb:
+            parts.append(f"Manutention sans quai=NC pour {len(manu_pb)} véhicule(s) compatibles")
+        return " | ".join(parts)
+    return "Incompatibilité inconnue"
 
 
 def appliquer_facteur_circulation(

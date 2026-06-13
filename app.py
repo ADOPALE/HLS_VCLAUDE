@@ -649,8 +649,41 @@ with tabs[2]:
 
                 if all_infaisables:
                     st.error(f"⛔ {len(all_infaisables)} flux infaisable(s) détecté(s).")
+
+                    # Colonnes à afficher — lisibles et informatives
+                    cols_display = [
+                        "id_flux", "site_depart", "site_arrivee", "quantite",
+                        "t_min", "fenetre_disponible", "ecart",
+                        "heure_dispo_str", "heure_max_str",
+                        "raison", "raison_detail", "detail_calcul", "jour",
+                    ]
                     df_inf = pd.DataFrame(all_infaisables)
-                    st.dataframe(df_inf, use_container_width=True)
+                    # Garder uniquement les colonnes présentes
+                    cols_ok = [c for c in cols_display if c in df_inf.columns]
+                    df_show = df_inf[cols_ok].rename(columns={
+                        "id_flux": "ID flux",
+                        "site_depart": "Départ",
+                        "site_arrivee": "Arrivée",
+                        "quantite": "Qté",
+                        "t_min": "T_min (min)",
+                        "fenetre_disponible": "Fenêtre (min)",
+                        "ecart": "Écart (min)",
+                        "heure_dispo_str": "Dispo",
+                        "heure_max_str": "Max",
+                        "raison": "Raison",
+                        "raison_detail": "Détail",
+                        "detail_calcul": "Calcul T_min",
+                        "jour": "Jour",
+                    })
+                    st.dataframe(df_show, use_container_width=True)
+
+                    # Grouper par raison pour afficher un résumé
+                    nb_compat = sum(1 for f in all_infaisables if "Aucun" in f.get("raison",""))
+                    nb_fenetre = len(all_infaisables) - nb_compat
+                    if nb_compat:
+                        st.warning(f"⚠️ {nb_compat} flux sans véhicule compatible — vérifier param Véhicules / param Sites.")
+                    if nb_fenetre:
+                        st.warning(f"⚠️ {nb_fenetre} flux avec fenêtre horaire trop courte — vérifier les horaires dans M flux.")
                 else:
                     st.success("✅ Tous les flux sont faisables. Vous pouvez lancer la simulation.")
 
