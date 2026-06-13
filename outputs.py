@@ -69,40 +69,40 @@ def generate_excel_results(
     # --- Onglet Synthèse flotte ---
     ws = wb.add_worksheet(config.EXPORT_SHEETS["synthese_flotte"])
     headers = [
-        "Jour", "Type de véhicule", "Nombre utilisé", "Nb tournées",
+        "Jour", "Type de véhicule", "Véhicules physiques", "Nb tournées",
         "Km totaux", "Km à plein", "Km à vide",
-        "Temps total (min)", "Taux utilisation (%)", "Nb désinfections",
-        "Coût estimé (€)", "Émissions CO₂ (kg)",
+        "Désinfections", "Coût estimé (€)", "Émissions CO₂ (kg)",
     ]
     _write_headers(ws, headers, fmt_header)
     row = 1
     for res in resultats:
-        veh_counts: Dict[str, Dict] = {}
+        # Compter postes (véhicules physiques) et tournées par type
+        postes_par_type: Dict[str, int] = {}
+        for p in res.postes:
+            postes_par_type[p.type_vehicule] = postes_par_type.get(p.type_vehicule, 0) + 1
+
+        veh_stats: Dict[str, Dict] = {}
         for t in res.tournees:
             vt = t.type_vehicule
-            if vt not in veh_counts:
-                veh_counts[vt] = {"nb": 0, "tournees": 0, "km": 0, "km_vide": 0,
-                                   "temps": 0, "desinf": 0, "cout": 0, "co2": 0}
-            veh_counts[vt]["nb"] += 1
-            veh_counts[vt]["tournees"] += 1
-            veh_counts[vt]["km"] += t.km_total
-            veh_counts[vt]["km_vide"] += t.km_vide
-            veh_counts[vt]["temps"] += t.heure_fin - t.heure_debut
-            veh_counts[vt]["desinf"] += t.nb_desinfections
+            if vt not in veh_stats:
+                veh_stats[vt] = {"tournees": 0, "km": 0, "km_vide": 0,
+                                  "desinf": 0, "cout": 0, "co2": 0}
+            veh_stats[vt]["tournees"] += 1
+            veh_stats[vt]["km"] += t.km_total
+            veh_stats[vt]["km_vide"] += t.km_vide
+            veh_stats[vt]["desinf"] += t.nb_desinfections
             vd = vehicules_data.get(vt, {})
-            veh_counts[vt]["cout"] += t.km_total * vd.get("cout_carburant", 0)
-            veh_counts[vt]["co2"] += t.km_total * vd.get("cout_carbone", 0)
+            veh_stats[vt]["cout"] += t.km_total * vd.get("cout_carburant", 0)
+            veh_stats[vt]["co2"] += t.km_total * vd.get("cout_carbone", 0)
 
-        for vt, stats in sorted(veh_counts.items()):
+        for vt, stats in sorted(veh_stats.items()):
             fm = fmt_row(row)
             km_plein = stats["km"] - stats["km_vide"]
-            # Taux = nb tournées × durée moy / (nb postes × vacation)
-            # Approximation : stats["temps"] = somme des durées tournées
-            taux_util = min(100.0, (stats["temps"] / (stats["nb"] * max(rh.get("vacation_duration", 450), 1)) * 100)) if stats["nb"] else 0
+            nb_postes = postes_par_type.get(vt, 0)
             ws.write_row(row, 0, [
-                res.jour, vt, stats["nb"], stats["tournees"],
+                res.jour, vt, nb_postes, stats["tournees"],
                 round(stats["km"], 1), round(km_plein, 1), round(stats["km_vide"], 1),
-                stats["temps"], round(taux_util, 1), stats["desinf"],
+                stats["desinf"],
                 round(stats["cout"], 2), round(stats["co2"], 2),
             ], fm)
             row += 1
